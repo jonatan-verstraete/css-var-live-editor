@@ -3,7 +3,7 @@
   "name": "DoubleDash Editor",
   "description": "DevTools CSS variable editor for fast live overrides.",
   "version": "0.3.0",
-  "permissions": ["clipboardWrite", "scripting"],
+  "permissions": ["clipboardWrite", "scripting", "storage"],
   "devtools_page": "devtools.html",
   "icons": {
     "16": "./assets/favicon-16x16.png",

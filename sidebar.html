@@ -15,12 +15,22 @@
         <button id="resetBtn" type="button" class="btn">Reset</button>
       </section>
       <section class="filters">
-        <button type="button" class="filter-btn state-off" data-filter="overridden">Overridden</button>
+        <button
+          type="button"
+          class="filter-btn state-off"
+          data-filter="multiDeclared"
+          title="Declared in multiple places"
+        >
+          Multi-Declared
+        </button>
         <button type="button" class="filter-btn state-off" data-filter="colors">Colors</button>
-        <button type="button" class="filter-btn state-off" data-filter="unused">Unused</button>
         <label class="selected-toggle">
           <input id="selectedOnlyToggle" type="checkbox" />
           <span>Selected only</span>
+        </label>
+        <label class="selected-toggle">
+          <input id="localModeToggle" type="checkbox" />
+          <span>Apply to element only</span>
         </label>
       </section>
       <section id="meta" class="meta"></section>
@@ -35,12 +45,12 @@
         <div class="controls">
           <input class="color hidden" type="color" aria-label="Pick color" />
           <input class="text" type="text" />
-          <button class="locate btn" type="button" title="Locate declaration">📍</button>
+          <button class="trace btn" type="button" title="Trace declaration source">📍</button>
           <button class="revert btn" type="button" title="Revert">🔄</button>
         </div>
       </li>
     </template>
 
-    <script src="sidebar.js" type="module"></script>
+    <script src="sidebar.js"></script>
   </body>
 </html>

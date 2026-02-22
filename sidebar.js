@@ -4,8 +4,27 @@ const tabId = Number(params.get("tabId"));
 const STYLE_ID = "doubledash-editor-overrides";
 const ROOT_MARKER_ATTR = "data-doubledash-editor";
 const SESSION_KEY = `doubledash:state:${tabId}`;
+const STORAGE_AREA = chrome.storage.session;
 
-const FILTER_ORDER = ["overridden", "colors", "unused"];
+
+// TODO. Fix features set to false due to inaccuracy.
+const FEATURES = {
+  // Show the "Multi-Declared" filter chip (counts repeated declarations, not cascade winners).
+  filterMultiDeclared: false,
+  filterColors: false,
+  // Show the "Apply to element only" toggle for local inline style edits on $0.
+  selectedOnly: false,
+  // Show the "Selected only" toggle to focus vars visible/declared on current selection.
+  localEditMode: false,
+  // Show per-row "Trace" action that walks inheritance boundaries to guess source.
+  traceSource: false,
+};
+
+
+const FILTER_ORDER = [
+  ...(FEATURES.filterMultiDeclared ? ["multiDeclared"] : []),
+  ...(FEATURES.filterColors ? ["colors"] : [])
+];
 const FILTER_CYCLE = {
   off: "include",
   include: "exclude",
@@ -17,15 +36,16 @@ const state = {
   selectionLabel: "",
   overrides: {},
   filterStates: {
-    overridden: "off",
-    colors: "off",
-    unused: "off"
+    multiDeclared: "off",
+    colors: "off"
   },
   showSelectedOnly: false,
+  localEditMode: false,
   refreshQueued: false,
   refreshTimer: null,
   loading: false,
-  pageKey: ""
+  pageKey: "",
+  corsSkippedSheets: 0
 };
 
 const els = {
@@ -34,6 +54,7 @@ const els = {
   refreshBtn: document.getElementById("refreshBtn"),
   resetBtn: document.getElementById("resetBtn"),
   selectedOnlyToggle: document.getElementById("selectedOnlyToggle"),
+  localModeToggle: document.getElementById("localModeToggle"),
   filterButtons: Array.from(document.querySelectorAll(".filter-btn")),
   meta: document.getElementById("meta"),
   varList: document.getElementById("varList"),
@@ -80,14 +101,16 @@ function normalizeDeepScan(result) {
     return {
       variables: [],
       selectionLabel: "No element selected",
-      pageKey: ""
+      pageKey: "",
+      corsSkippedSheets: 0
     };
   }
 
   return {
     variables: Array.isArray(result.variables) ? result.variables : [],
     selectionLabel: typeof result.selectionLabel === "string" ? result.selectionLabel : "No element selected",
-    pageKey: typeof result.pageKey === "string" ? result.pageKey : ""
+    pageKey: typeof result.pageKey === "string" ? result.pageKey : "",
+    corsSkippedSheets: Number.isFinite(result.corsSkippedSheets) ? result.corsSkippedSheets : 0
   };
 }
 
@@ -111,9 +134,10 @@ function normalizeSelectionSnapshot(result) {
   };
 }
 
-function readSessionState() {
+async function readSessionState() {
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
+    const stored = await STORAGE_AREA.get(SESSION_KEY);
+    const raw = stored?.[SESSION_KEY];
     if (!raw) {
       return;
     }
@@ -130,6 +154,10 @@ function readSessionState() {
     if (typeof parsed.showSelectedOnly === "boolean") {
       state.showSelectedOnly = parsed.showSelectedOnly;
       els.selectedOnlyToggle.checked = parsed.showSelectedOnly;
+    }
+    if (typeof parsed.localEditMode === "boolean") {
+      state.localEditMode = parsed.localEditMode;
+      els.localModeToggle.checked = parsed.localEditMode;
     }
 
     if (parsed.filterStates && typeof parsed.filterStates === "object") {
@@ -148,26 +176,57 @@ function readSessionState() {
     if (typeof parsed.pageKey === "string") {
       state.pageKey = parsed.pageKey;
     }
+    if (Number.isFinite(parsed.corsSkippedSheets)) {
+      state.corsSkippedSheets = parsed.corsSkippedSheets;
+    }
   } catch (_error) {
     // Ignore malformed session values.
   }
 }
 
-function writeSessionState() {
+async function writeSessionState() {
   const payload = {
     overrides: state.overrides,
     search: els.searchInput.value,
     showSelectedOnly: state.showSelectedOnly,
+    localEditMode: state.localEditMode,
     filterStates: state.filterStates,
     variables: state.variables,
-    pageKey: state.pageKey || ""
+    pageKey: state.pageKey || "",
+    corsSkippedSheets: state.corsSkippedSheets
   };
 
   try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+    await STORAGE_AREA.set({ [SESSION_KEY]: JSON.stringify(payload) });
   } catch (_error) {
     // Ignore quota/availability issues.
   }
+}
+
+function persistState() {
+  void writeSessionState();
+}
+
+function applyFeatureFlagsToUI() {
+  for (const button of els.filterButtons) {
+    const key = button.dataset.filter;
+    const enabled = FILTER_ORDER.includes(key);
+    button.hidden = !enabled;
+    button.style.display = enabled ? 'block' : 'none';
+
+  }
+
+  if (!FEATURES.selectedOnly) {
+    els.selectedOnlyToggle.parentElement.style.display = 'none'
+  }
+  if (!FEATURES.localEditMode) {
+    els.localModeToggle.parentElement.style.display = 'none'
+  }
+
+  if (els.selectedOnlyWrap) {
+    els.localModeToggle.parentElement.style.display = 'none'
+  }
+
 }
 
 function setError(message) {
@@ -260,7 +319,10 @@ function getColor(value) {
         trimmed[3]
       ).toLowerCase();
     }
-    return trimmed.slice(0, 7).toLowerCase();
+    if (trimmed.length === 7) {
+      return trimmed.toLowerCase();
+    }
+    return null;
   }
 
   optionStyle.color = "";
@@ -271,11 +333,17 @@ function getColor(value) {
   }
 
   if (parsed.startsWith("rgb")) {
-    const values = parsed.match(/\d+/g);
-    if (!values || values.length < 3) {
+    const rgbaMatch = parsed.match(
+      /^rgba?\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*(?:,\s*(\d*\.?\d+)\s*)?\)$/i
+    );
+    if (!rgbaMatch) {
       return null;
     }
-    const [r, g, b] = values.slice(0, 3).map((str) => Number(str));
+    const alpha = rgbaMatch[4] === undefined ? 1 : Number(rgbaMatch[4]);
+    if (!Number.isFinite(alpha) || alpha < 1) {
+      return null;
+    }
+    const [r, g, b] = rgbaMatch.slice(1, 4).map((str) => Number(str));
     return (
       "#" +
       [r, g, b]
@@ -284,21 +352,21 @@ function getColor(value) {
     );
   }
 
-  return parsed.startsWith("#") ? parsed.slice(0, 7).toLowerCase() : null;
+  return parsed.startsWith("#") && parsed.length === 7 ? parsed.toLowerCase() : null;
 }
 
 function effectiveValue(item) {
-  if (Object.prototype.hasOwnProperty.call(state.overrides, item.name)) {
+  if (!state.localEditMode && Object.prototype.hasOwnProperty.call(state.overrides, item.name)) {
     return state.overrides[item.name];
+  }
+  if (state.localEditMode) {
+    return item.selectedValue || item.value || "";
   }
   return state.showSelectedOnly ? item.selectedValue || "" : item.value || "";
 }
 
 function itemHasCategory(item, category) {
-  if (category === "unused") {
-    return Boolean(item.unused);
-  }
-  if (category === "overridden") {
+  if (category === "multiDeclared") {
     return Boolean(item.overridden);
   }
   if (category === "colors") {
@@ -327,7 +395,7 @@ function getFilteredRows() {
   const rows = [];
 
   for (const item of state.variables) {
-    if (state.showSelectedOnly && !item.selectedValue) {
+    if (state.showSelectedOnly && !(item.selectedValue || item.selectedDeclaredValue)) {
       continue;
     }
 
@@ -347,7 +415,6 @@ function getFilteredRows() {
         selectedValue: item.selectedValue,
         selectedDeclaredValue: item.selectedDeclaredValue,
         overridden: item.overridden,
-        unused: item.unused,
         isColor: item.isColor,
         sources: Array.isArray(item.sources) ? item.sources : []
       });
@@ -384,64 +451,10 @@ async function refreshSelectionSnapshot() {
     const computed = getComputedStyle(target);
 
     const declaredMap = Object.create(null);
-
     for (let i = 0; i < target.style.length; i += 1) {
       const prop = target.style[i];
       if (prop && prop.startsWith("--")) {
         declaredMap[prop] = target.style.getPropertyValue(prop).trim();
-      }
-    }
-
-    let rules = [];
-    if (typeof window.getMatchedCSSRules === "function") {
-      try {
-        rules = Array.from(window.getMatchedCSSRules(target) || []);
-      } catch (_error) {
-        rules = [];
-      }
-    }
-
-    if (!rules.length) {
-      const matched = [];
-      const visit = (sheetRules) => {
-        for (const rule of Array.from(sheetRules || [])) {
-          if (rule.style && rule.selectorText) {
-            try {
-              if (target.matches(rule.selectorText)) {
-                matched.push(rule);
-              }
-            } catch (_error) {
-              // Ignore invalid selectors for matches().
-            }
-          }
-          if (rule.cssRules) {
-            visit(rule.cssRules);
-          }
-        }
-      };
-
-      for (const sheet of Array.from(document.styleSheets)) {
-        let sheetRules;
-        try {
-          sheetRules = sheet.cssRules;
-        } catch (_error) {
-          continue;
-        }
-        visit(sheetRules);
-      }
-
-      rules = matched;
-    }
-
-    for (const rule of rules) {
-      if (!rule.style) {
-        continue;
-      }
-      for (let i = 0; i < rule.style.length; i += 1) {
-        const prop = rule.style[i];
-        if (prop && prop.startsWith("--") && !declaredMap[prop]) {
-          declaredMap[prop] = rule.style.getPropertyValue(prop).trim();
-        }
       }
     }
 
@@ -478,22 +491,14 @@ async function refreshSelectionSnapshot() {
     selectedDeclaredValue: selectedDeclaredValues[item.name] || ""
   }));
 
-  writeSessionState();
+  persistState();
 }
 
 async function runDeepScan() {
   const result = await evalOnInspectedPage(`(() => {
-    const pageKey = location.origin + location.pathname;
+    const pageKey = location.origin + location.pathname + location.search;
     const target = $0;
-
-    const bodyComputed = getComputedStyle(document.body || document.documentElement);
-    const bodyNames = new Set();
-    for (let i = 0; i < bodyComputed.length; i += 1) {
-      const prop = bodyComputed[i];
-      if (prop && prop.startsWith("--")) {
-        bodyNames.add(prop);
-      }
-    }
+    let corsSkippedSheets = 0;
 
     const map = new Map();
 
@@ -557,6 +562,7 @@ async function runDeepScan() {
       try {
         rules = sheet.cssRules;
       } catch (_error) {
+        corsSkippedSheets += 1;
         continue;
       }
       visitRules(rules, sheet);
@@ -649,10 +655,9 @@ async function runDeepScan() {
     }
 
     const variables = Array.from(map.values()).map((item) => {
-      const bodyValue = bodyComputed.getPropertyValue(item.name).trim();
       const selectedValue = selectedValues[item.name] || "";
       const selectedDeclaredValue = selectedDeclaredValues[item.name] || "";
-      const value = bodyValue || item.declaredValue || "";
+      const value = selectedValue || item.declaredValue || "";
 
       return {
         name: item.name,
@@ -661,7 +666,6 @@ async function runDeepScan() {
         selectedDeclaredValue,
         declaredCount: item.declaredCount,
         overridden: item.declaredCount > 1,
-        unused: !bodyNames.has(item.name),
         isColor: Boolean(value && CSS.supports("color", value)),
         sources: item.sources
       };
@@ -672,7 +676,8 @@ async function runDeepScan() {
     return {
       pageKey,
       selectionLabel,
-      variables
+      variables,
+      corsSkippedSheets
     };
   })()`);
 
@@ -680,14 +685,13 @@ async function runDeepScan() {
   state.variables = normalized.variables;
   state.selectionLabel = normalized.selectionLabel;
   state.pageKey = normalized.pageKey;
-  writeSessionState();
+  state.corsSkippedSheets = normalized.corsSkippedSheets;
+  persistState();
 }
 
-async function locateVarSource(varName, sources) {
-  const payload = JSON.stringify(sources || []);
+async function traceVarSource(varName) {
   const result = await evalOnInspectedPage(`(() => {
     const varName = ${JSON.stringify(varName)};
-    const sources = ${payload};
 
     const inspectEl = (el) => {
       if (!(el instanceof Element)) {
@@ -703,95 +707,54 @@ async function locateVarSource(varName, sources) {
     };
 
     const target = $0;
-    if (target instanceof Element) {
-      if ((target.style.getPropertyValue(varName) || "").trim()) {
-        if (inspectEl(target)) {
-          return "Located on selected element";
-        }
-      }
-
-      let rules = [];
-      if (typeof window.getMatchedCSSRules === "function") {
-        try {
-          rules = Array.from(window.getMatchedCSSRules(target) || []);
-        } catch (_error) {
-          rules = [];
-        }
-      }
-
-      if (!rules.length) {
-        const fallback = [];
-        const visit = (sheetRules) => {
-          for (const rule of Array.from(sheetRules || [])) {
-            if (rule.style && rule.selectorText) {
-              try {
-                if (target.matches(rule.selectorText)) {
-                  fallback.push(rule);
-                }
-              } catch (_error) {
-                // Ignore invalid selector.
-              }
-            }
-            if (rule.cssRules) {
-              visit(rule.cssRules);
-            }
-          }
-        };
-
-        for (const sheet of Array.from(document.styleSheets)) {
-          let sheetRules;
-          try {
-            sheetRules = sheet.cssRules;
-          } catch (_error) {
-            continue;
-          }
-          visit(sheetRules);
-        }
-
-        rules = fallback;
-      }
-
-      for (const rule of rules) {
-        if (!rule.style) {
-          continue;
-        }
-        if (!(rule.style.getPropertyValue(varName) || "").trim()) {
-          continue;
-        }
-
-        const selector = rule.selectorText || "";
-        if (selector) {
-          try {
-            const el = document.querySelector(selector);
-            if (inspectEl(el)) {
-              return "Located via matched rule";
-            }
-          } catch (_error) {
-            // Ignore invalid selector.
-          }
-        }
-      }
+    if (!(target instanceof Element)) {
+      return "Trace unavailable: no element selected";
     }
 
-    for (const source of sources) {
-      const selector = source && source.selector ? source.selector : "";
-      if (!selector) {
-        continue;
-      }
-      try {
-        const el = document.querySelector(selector);
-        if (inspectEl(el)) {
-          return "Located via stylesheet selector";
+    let child = target;
+    let childValue = getComputedStyle(child).getPropertyValue(varName).trim();
+
+    while (child.parentElement) {
+      const parent = child.parentElement;
+      const parentValue = getComputedStyle(parent).getPropertyValue(varName).trim();
+      if (childValue !== parentValue) {
+        if (inspectEl(child)) {
+          return "Traced to inheritance boundary";
         }
-      } catch (_error) {
-        // Ignore invalid selector.
+        break;
       }
+      child = parent;
+      childValue = parentValue;
     }
 
-    return "Declaration source not found";
+    if (inspectEl(target)) {
+      return "Trace stayed on selected element";
+    }
+    return "Trace source not found";
   })()`);
 
-  return typeof result === "string" ? result : "Declaration source not found";
+  return typeof result === "string" ? result : "Trace source not found";
+}
+
+async function applyLocalEdit(name, value) {
+  const result = await evalOnInspectedPage(`(() => {
+    const name = ${JSON.stringify(name)};
+    const value = ${JSON.stringify(value)};
+    const target = $0;
+    if (!(target instanceof Element)) {
+      return "Local edit unavailable: no element selected";
+    }
+    if (value && value.trim()) {
+      target.style.setProperty(name, value.trim());
+    } else {
+      target.style.removeProperty(name);
+    }
+    return "ok";
+  })()`);
+
+  if (result !== "ok") {
+    throw new Error(typeof result === "string" ? result : "Local edit failed");
+  }
 }
 
 async function refreshScan({ deep, showLoading }) {
@@ -821,17 +784,19 @@ function renderVarList() {
   const rows = getFilteredRows();
   els.varList.innerHTML = "";
 
+  const templateCopy = els.rowTemplate.content.firstElementChild.cloneNode(true);
+
   for (const row of rows) {
-    const node = els.rowTemplate.content.firstElementChild.cloneNode(true);
+    const node = templateCopy.cloneNode(true);
     const nameEl = node.querySelector(".name");
     const colorInput = node.querySelector(".color");
     const textInput = node.querySelector(".text");
-    const locateBtn = node.querySelector(".locate");
+    const traceBtn = node.querySelector(".trace");
     const revertBtn = node.querySelector(".revert");
 
     nameEl.textContent = row.name;
     textInput.value = row.value;
-    textInput.title = row.selectedDeclaredValue ? "Declared on selected element or matched rule" : "Inherited/Computed";
+    textInput.title = row.selectedDeclaredValue ? "Declared on selected element" : "Inherited/Computed";
 
     const color = getColor(row.value);
     if (color) {
@@ -840,10 +805,16 @@ function renderVarList() {
       colorInput.addEventListener("input", async (event) => {
         const next = event.target.value;
         textInput.value = next;
-        state.overrides[row.name] = next;
-        writeSessionState();
         try {
-          await queueSyncOverrides(90);
+          if (state.localEditMode) {
+            await applyLocalEdit(row.name, next);
+            await refreshSelectionSnapshot();
+            renderVarList();
+          } else {
+            state.overrides[row.name] = next;
+            persistState();
+            await queueSyncOverrides(90);
+          }
         } catch (error) {
           setError(error?.message || String(error));
         }
@@ -855,16 +826,21 @@ function renderVarList() {
     let applyTimer = null;
     const applyCurrentInput = async (rerender) => {
       const next = textInput.value.trim();
-      if (!next) {
-        delete state.overrides[row.name];
-      } else {
-        state.overrides[row.name] = next;
-      }
-
-      writeSessionState();
-
       try {
-        await queueSyncOverrides(90);
+        if (state.localEditMode) {
+          await applyLocalEdit(row.name, next);
+          if (rerender) {
+            await refreshSelectionSnapshot();
+          }
+        } else {
+          if (!next) {
+            delete state.overrides[row.name];
+          } else {
+            state.overrides[row.name] = next;
+          }
+          persistState();
+          await queueSyncOverrides(90);
+        }
         if (rerender) {
           renderVarList();
         }
@@ -882,20 +858,29 @@ function renderVarList() {
 
     textInput.addEventListener("change", () => applyCurrentInput(true));
 
-    locateBtn.addEventListener("click", async () => {
-      try {
-        const message = await locateVarSource(row.name, row.sources);
-        els.meta.textContent = message;
-      } catch (error) {
-        setError(error?.message || String(error));
-      }
-    });
+    if (!FEATURES.traceSource) {
+      traceBtn.style.display = 'none';
+    } else {
+      traceBtn.addEventListener("click", async () => {
+        try {
+          const message = await traceVarSource(row.name);
+          els.meta.textContent = message;
+        } catch (error) {
+          setError(error?.message || String(error));
+        }
+      });
+    }
 
     revertBtn.addEventListener("click", async () => {
-      delete state.overrides[row.name];
-      writeSessionState();
       try {
-        await syncOverridesToInspectedPage();
+        if (state.localEditMode) {
+          await applyLocalEdit(row.name, "");
+          await refreshSelectionSnapshot();
+        } else {
+          delete state.overrides[row.name];
+          persistState();
+          await syncOverridesToInspectedPage();
+        }
         renderVarList();
       } catch (error) {
         setError(error?.message || String(error));
@@ -910,13 +895,17 @@ function renderVarList() {
 
 function updateMeta(visibleCount) {
   const total = state.variables.length;
-  els.meta.textContent = `${state.selectionLabel} • ${visibleCount}/${total} vars`;
+  let message = `${state.selectionLabel} • ${visibleCount}/${total} vars`;
+  if (state.corsSkippedSheets > 0) {
+    message += ` • ⚠ Partial coverage (CORS restricted sheets skipped: ${state.corsSkippedSheets})`;
+  }
+  els.meta.textContent = message;
 }
 
 function cycleFilterState(key) {
   const current = state.filterStates[key] || "off";
   state.filterStates[key] = FILTER_CYCLE[current];
-  writeSessionState();
+  persistState();
   renderFilterButtons();
   renderVarList();
 }
@@ -964,9 +953,27 @@ function scheduleSelectionRefresh() {
   }, 120);
 }
 
+async function resetLocalEdits() {
+  const names = JSON.stringify(state.variables.map((item) => item.name));
+  const result = await evalOnInspectedPage(`(() => {
+    const names = ${names};
+    const target = $0;
+    if (!(target instanceof Element)) {
+      return "Local reset unavailable: no element selected";
+    }
+    for (const name of names) {
+      target.style.removeProperty(name);
+    }
+    return "ok";
+  })()`);
+  if (result !== "ok") {
+    throw new Error(typeof result === "string" ? result : "Local reset failed");
+  }
+}
+
 function bindEvents() {
   els.searchInput.addEventListener("input", () => {
-    writeSessionState();
+    persistState();
     renderVarList();
   });
 
@@ -975,10 +982,15 @@ function bindEvents() {
   });
 
   els.resetBtn.addEventListener("click", async () => {
-    state.overrides = {};
-    writeSessionState();
     try {
-      await syncOverridesToInspectedPage();
+      if (state.localEditMode) {
+        await resetLocalEdits();
+        await refreshSelectionSnapshot();
+      } else {
+        state.overrides = {};
+        persistState();
+        await syncOverridesToInspectedPage();
+      }
       renderVarList();
     } catch (error) {
       setError(error?.message || String(error));
@@ -991,7 +1003,13 @@ function bindEvents() {
 
   els.selectedOnlyToggle.addEventListener("change", () => {
     state.showSelectedOnly = els.selectedOnlyToggle.checked;
-    writeSessionState();
+    persistState();
+    renderVarList();
+  });
+
+  els.localModeToggle.addEventListener("change", () => {
+    state.localEditMode = els.localModeToggle.checked;
+    persistState();
     renderVarList();
   });
 
@@ -1021,7 +1039,7 @@ function bindEvents() {
 }
 
 async function ensureFreshData() {
-  const currentPageKey = await evalOnInspectedPage("location.origin + location.pathname");
+  const currentPageKey = await evalOnInspectedPage("location.origin + location.pathname + location.search");
   if (!state.variables.length || !state.pageKey || state.pageKey !== currentPageKey) {
     await refreshScan({ deep: true, showLoading: true });
     return;
@@ -1039,7 +1057,9 @@ async function init() {
     return;
   }
 
-  readSessionState();
+  await readSessionState();
+  applyFeatureFlagsToUI();
+  persistState();
   renderFilterButtons();
   await syncOverridesToInspectedPage();
   await ensureFreshData();
