@@ -15,9 +15,8 @@
         <button id="resetBtn" type="button" class="btn">Reset</button>
       </section>
       <section class="filters">
-        <button type="button" class="filter-btn state-off" data-filter="local">Local</button>
-        <button type="button" class="filter-btn state-off" data-filter="external">External</button>
-        <button type="button" class="filter-btn state-off" data-filter="extension">Ext</button>
+        <button type="button" class="filter-btn state-off" data-filter="overridden">Overridden</button>
+        <button type="button" class="filter-btn state-off" data-filter="colors">Colors</button>
         <button type="button" class="filter-btn state-off" data-filter="unused">Unused</button>
         <label class="selected-toggle">
           <input id="selectedOnlyToggle" type="checkbox" />
@@ -36,6 +35,7 @@
         <div class="controls">
           <input class="color hidden" type="color" aria-label="Pick color" />
           <input class="text" type="text" />
+          <button class="locate btn" type="button" title="Locate declaration">📍</button>
           <button class="revert btn" type="button" title="Revert">🔄</button>
         </div>
       </li>
