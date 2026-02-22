@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DoubleDash Editor</title>
+    <link rel="stylesheet" href="sidebar.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <input id="searchInput" type="search" placeholder="Search var name or value" />
+        <button id="copyBtn" type="button" class="btn">Copy</button>
+        <button id="refreshBtn" type="button" class="btn">Refresh</button>
+        <button id="resetBtn" type="button" class="btn">Reset</button>
+      </section>
+      <section class="filters">
+        <button type="button" class="filter-btn state-off" data-filter="local">Local</button>
+        <button type="button" class="filter-btn state-off" data-filter="external">External</button>
+        <button type="button" class="filter-btn state-off" data-filter="extension">Ext</button>
+        <button type="button" class="filter-btn state-off" data-filter="unused">Unused</button>
+        <label class="selected-toggle">
+          <input id="selectedOnlyToggle" type="checkbox" />
+          <span>Selected only</span>
+        </label>
+      </section>
+      <section id="meta" class="meta"></section>
+      <section class="list-wrap">
+        <ul id="varList" class="var-list"></ul>
+      </section>
+    </main>
+
+    <template id="rowTemplate">
+      <li class="row">
+        <code class="name"></code>
+        <div class="controls">
+          <input class="color hidden" type="color" aria-label="Pick color" />
+          <input class="text" type="text" />
+          <button class="revert btn" type="button" title="Revert">🔄</button>
+        </div>
+      </li>
+    </template>
+
+    <script src="sidebar.js" type="module"></script>
+  </body>
+</html>
